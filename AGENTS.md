@@ -22,9 +22,11 @@ This game's own files:
 - `src/game.rs` — Spider: the deal, the move grammar, completed runs, the score,
   the undo history, the hint heuristic, the save format, and **every word the
   page shows**. No `web-sys`, so `cargo test` runs it.
-- `src/ui.rs` — a `Rules` implementation: how a scene is built from this game,
-  what each intent means, and the two decorations this board has. It binds no
-  DOM events and holds no elements.
+- `src/scene.rs` — the game as the board draws it: the piles, how each fans,
+  where the keyboard starts. Compiled for the host too, so the board's
+  arrangement is something `cargo test` can check.
+- `src/ui.rs` — a `Rules` implementation: what each intent means, and the two
+  decorations this board has. It binds no DOM events and holds no elements.
 - `src/ui.html`, `src/style.css`, `src/service-worker.js`, `build.rs`,
   `assets/icon.svg` — the shell, the styles, the worker, the site writer and the
   icon, as the template describes them.
@@ -81,6 +83,13 @@ the index of the *first* face-up card, so `up = len - 1` after a deal hides the
 whole column. That was a real defect, reported from play; it is now pinned by
 two tests, one on a hand-built column and one that deals five times and checks
 the face-up count never goes down.
+
+**A pile that fans sideways is given the cells it fans into.** Spider's columns
+fan downwards, inside their own cell, so this game asks for no extra cells — but
+the board that guarantees it is shared, and it is the board that decides. A pile
+occupying two cells pushes the next pile along, and a fan is clamped to its own
+cell; the test that says no pile here asks for more than one is what keeps this
+game's row as one stock plus nine free cells for the runs strip.
 
 **Cards are placed with `left`/`top`, not `transform`.** A transform transition
 is compositor-driven: a renderer that does not advance animations draws every

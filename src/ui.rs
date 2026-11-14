@@ -11,7 +11,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::board::{Fan, Place, Scene, Slot};
+use crate::board::{Place, Scene};
 use crate::board_ui::{BoardUi, Intent};
 use crate::game::deck as spider_deck;
 use crate::game::{
@@ -198,25 +198,6 @@ impl Spider {
     }
 }
 
-/// Where the keyboard should be: the stock while there is one, else the first
-/// column with a card that can be picked up.
-fn default_focus(game: &Game) -> (Place, Option<usize>) {
-    if game.pile_len(Pile::Stock) > 0 {
-        return (Pile::Stock.place(), Some(game.pile_len(Pile::Stock) - 1));
-    }
-    for column in 0..COLUMNS {
-        let pile = Pile::Tableau(column);
-        let len = game.pile_len(pile);
-        if let Some(index) = (0..len)
-            .rev()
-            .find(|&index| !game.is_face_down(pile, index))
-        {
-            return (pile.place(), Some(index));
-        }
-    }
-    (Pile::Tableau(0).place(), None)
-}
-
 impl Rules for Spider {
     fn deck(&self) -> Vec<crate::card::Card> {
         // The whole deck at the hardest setting: every suit, twice. The board
@@ -227,44 +208,7 @@ impl Rules for Spider {
     }
 
     fn scene(&self) -> Scene {
-        let mut slots = Vec::with_capacity(Pile::ALL.len());
-        for pile in Pile::ALL {
-            let cards: Vec<(u16, bool)> = self
-                .game
-                .pile(pile)
-                .iter()
-                .enumerate()
-                .map(|(index, &id)| (id, self.game.is_face_down(pile, index)))
-                .collect();
-            let fan = match pile {
-                Pile::Stock => Fan::PACKET,
-                Pile::Tableau(_) => Fan::COLUMN,
-            };
-            let mut slot = Slot::new(pile.place(), fan, self.game.pile_label(pile))
-                .with_mark(self.game.slot_mark(pile))
-                .with_cards(&cards);
-            if pile == Pile::Stock {
-                slot = slot.pressable();
-            }
-            slots.push(slot);
-        }
-        let mut scene = Scene::new(slots, 1);
-        scene.held = self
-            .game
-            .selection()
-            .map(|held| (held.pile.place(), held.index));
-        scene.hint = self.hint.as_ref().and_then(|hint| match hint {
-            Hint::Move {
-                from, index, count, ..
-            } => Some((from.place(), *index, *count)),
-            Hint::Deal { .. } => Some((
-                Pile::Stock.place(),
-                self.game.pile_len(Pile::Stock).saturating_sub(1),
-                1,
-            )),
-            Hint::None { .. } => None,
-        });
-        scene
+        crate::scene::scene(&self.game, self.hint.as_ref())
     }
 
     fn act(&mut self, intent: Intent) {
@@ -280,7 +224,7 @@ impl Rules for Spider {
     }
 
     fn default_focus(&self) -> (Place, Option<usize>) {
-        default_focus(&self.game)
+        crate::scene::default_focus(&self.game)
     }
 
     fn hint(&mut self) -> Option<String> {

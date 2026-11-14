@@ -39,7 +39,7 @@
 /// One place on the board: a slot in the top row, or a tableau column.
 ///
 /// The two games number these differently — Klondike's top row is the stock,
-/// the waste and four foundations, Spider's is its stock — so the board is told
+/// the waste and four foundations — so the board is told
 /// how many of each it has and never assumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Place {
@@ -158,6 +158,14 @@ pub struct Slot {
     pub label: String,
     /// True for a pile the player can press with nothing in hand: the stock.
     pub pressable: bool,
+    /// How many column cells this pile occupies, at least one.
+    ///
+    /// A pile whose cards fan sideways needs room to fan into. Three cards drawn
+    /// to one side of a board is the case this exists for: one cell is not
+    /// enough, and a fan that spills into the next pile's cell is a fan that
+    /// paints a card under that pile. Two cells give it the room the real game
+    /// gives it.
+    pub span: usize,
 }
 
 impl Slot {
@@ -171,6 +179,7 @@ impl Slot {
             mark: "",
             label: label.into(),
             pressable: false,
+            span: 1,
         }
     }
 
@@ -186,6 +195,22 @@ impl Slot {
     pub fn pressable(mut self) -> Self {
         self.pressable = true;
         self
+    }
+
+    /// The same slot, occupying `cells` column cells rather than one.
+    ///
+    /// A pile that fans sideways must be given the room it fans into; see
+    /// [`Slot::span`].
+    #[must_use]
+    pub fn spanning(mut self, cells: usize) -> Self {
+        self.span = cells.max(1);
+        self
+    }
+
+    /// How many column cells this pile occupies.
+    #[must_use]
+    pub fn cells(&self) -> usize {
+        self.span.max(1)
     }
 
     /// The same slot, holding these cards.
@@ -742,18 +767,37 @@ pub fn layout(scene: &Scene, frame: &Frame) -> Layout {
     let top_y = frame.margin;
     let column_y = top_y + card_h + (card_h * TOP_ROW_GAP).max(4.0);
 
+    // The top row is laid out by accumulated spans, not by index: a pile that
+    // occupies two cells pushes everything after it along, which is what gives
+    // a fanned pile its room and stops its fan reaching the next one.
+    let mut top_cells: Vec<(Place, f64, f64)> = Vec::new();
+    let mut cursor = 0usize;
+    for slot in scene.slots.iter().take(tops) {
+        let cell_x = column_x(cursor);
+        let (_, cell_w) = cell_width(card_w, gap, slot.cells());
+        top_cells.push((slot.place, cell_x, cell_w));
+        cursor += slot.cells();
+    }
+
     let mut slots = Vec::with_capacity(scene.slots.len());
     let mut cards = Vec::new();
     for slot in &scene.slots {
         let (x, y) = match slot.place {
-            Place::Top(index) => {
-                let index = index.min(tops.saturating_sub(1));
-                (column_x(index), top_y)
-            }
+            Place::Top(_) => top_cells
+                .iter()
+                .find(|(place, _, _)| *place == slot.place)
+                .map_or((column_x(0), top_y), |(_, x, _)| (*x, top_y)),
             Place::Column(index) => (column_x(index), column_y),
         };
+        let cell_w = match slot.place {
+            Place::Top(_) => top_cells
+                .iter()
+                .find(|(place, _, _)| *place == slot.place)
+                .map_or(card_w, |(_, _, width)| *width),
+            Place::Column(_) => card_w,
+        };
         slots.push((slot.place, x, y));
-        let offsets = fan_offsets(slot, card_h, vertical, column_y, frame);
+        let offsets = fan_offsets(slot, card_w, card_h, cell_w, vertical, column_y, frame);
         for (index, card) in slot.cards.iter().enumerate() {
             let (dx, dy) = offsets.get(index).copied().unwrap_or((0.0, 0.0));
             cards.push((card.id, x + dx, y + dy));
@@ -768,8 +812,40 @@ pub fn layout(scene: &Scene, frame: &Frame) -> Layout {
     }
 }
 
+/// How far apart a tail fan's cards are.
+///
+/// The natural spacing is a fraction of the card's *height*, which is wide
+/// enough to show a rank corner. It is then clamped to the pile's cell: a fan
+/// that leaves its cell overlaps the pile beside it, and the pile beside it
+/// paints over the fan — which is how three drawn cards came to hide under a
+/// pile. Only the last card's right edge matters, so the limit is
+/// `cell_w - card_w` of total spread, shared between the gaps.
+///
+/// The floor keeps the cards distinguishable when the cell really is tight: a
+/// sliver of rank is more use than one card pretending to be three.
+fn tail_step(card_w: f64, card_h: f64, cell_w: f64, fan: f64, shown: usize) -> f64 {
+    let natural = card_h * fan;
+    if shown < 2 {
+        return 0.0;
+    }
+    let room = (cell_w - card_w).max(0.0) / (shown - 1) as f64;
+    let floor = card_w * 0.08;
+    if room <= 0.0 {
+        return 0.0;
+    }
+    natural.min(room).max(floor.min(room))
+}
+
 /// The gap between the top row and the columns, in card widths.
 const TOP_ROW_GAP: f64 = 0.13;
+
+/// The width of a pile's cell: `cells` cards and the gaps between them.
+#[must_use]
+fn cell_width(card_w: f64, gap: f64, cells: usize) -> (f64, f64) {
+    let cells = cells.max(1);
+    let width = card_w * cells as f64 + gap * (cells.saturating_sub(1)) as f64;
+    (0.0, width)
+}
 
 /// The smallest the cards may shrink to before the fan compresses instead.
 const MIN_SCALE: f64 = 0.56;
@@ -782,7 +858,9 @@ const MIN_SCALE: f64 = 0.56;
 /// fan is scaled into the room left below the top row.
 fn fan_offsets(
     slot: &Slot,
+    card_w: f64,
     card_h: f64,
+    cell_w: f64,
     vertical: f64,
     column_y: f64,
     frame: &Frame,
@@ -798,9 +876,11 @@ fn fan_offsets(
     // A tail fan goes sideways for the last few cards.
     if slot.fan.fan_tail > 0 {
         let first = count.saturating_sub(slot.fan.fan_tail);
-        for (step, offset) in offsets.iter_mut().enumerate().skip(first) {
-            let step = f64::from(u32::try_from(step - first).unwrap_or(0));
-            *offset = (card_h * slot.fan.up * step, 0.0);
+        let shown = count - first;
+        let step = tail_step(card_w, card_h, cell_w, slot.fan.up, shown);
+        for (index, offset) in offsets.iter_mut().enumerate().skip(first) {
+            let nth = f64::from(u32::try_from(index - first).unwrap_or(0));
+            *offset = (nth * step, 0.0);
         }
         return offsets;
     }
@@ -858,6 +938,7 @@ mod tests {
             mark: "",
             label: format!("column {}", place + 1),
             pressable: false,
+            span: 1,
         }
     }
 
@@ -875,22 +956,34 @@ mod tests {
             mark: "",
             label: format!("slot {}", place + 1),
             pressable: true,
+            span: 1,
         }
     }
 
+    /// A scene shaped like a real Klondike board: seven columns, and a top row
+    /// of six piles where the fanned one takes two cells — which is the whole
+    /// point of `span`.
     fn simple_scene() -> Scene {
-        Scene::new(
-            vec![
-                top(0, &[(0, true), (1, true), (2, true)], Fan::PACKET),
-                top(1, &[(3, false)], Fan::tail(3)),
-                top(2, &[], Fan::PACKET),
-                top(3, &[], Fan::PACKET),
-                column(0, &[(10, true), (11, false), (12, false)]),
-                column(1, &[(20, false)]),
-                column(2, &[]),
-            ],
-            4,
-        )
+        let mut slots = vec![
+            top(0, &[(0, true), (1, true), (2, true)], Fan::PACKET),
+            Slot {
+                span: 2,
+                ..top(1, &[(3, false), (4, false), (5, false)], Fan::tail(3))
+            },
+            top(2, &[], Fan::PACKET),
+            top(3, &[], Fan::PACKET),
+            top(4, &[], Fan::PACKET),
+            top(5, &[], Fan::PACKET),
+            column(0, &[(10, true), (11, false), (12, false)]),
+            column(1, &[(20, false)]),
+            column(2, &[]),
+            column(3, &[]),
+            column(4, &[]),
+            column(5, &[]),
+            column(6, &[]),
+        ];
+        slots.shrink_to_fit();
+        Scene::new(slots, 6)
     }
 
     #[test]
@@ -937,19 +1030,21 @@ mod tests {
     }
 
     #[test]
-    fn the_top_row_uses_its_own_slots_rather_than_the_columns() {
-        // Four top slots and three columns: the top slots take the first four
-        // column positions, so the fourth foundation sits above the third
-        // column and nothing overlaps.
+    fn a_spanning_pile_pushes_the_piles_after_it_along() {
+        // The top row is a packet (one cell), a fanned pile (two cells), then
+        // three single cells. So the pile after the fanned one sits above the
+        // *fourth* column, not the third — which is what gives the fan room.
         let scene = simple_scene();
         let layout = layout(&scene, &frame(1000.0, 800.0));
-        for index in 0..4 {
-            let (top_x, _) = layout.place(Place::Top(index)).expect("placed");
-            let (col_x, _) = layout.place(Place::Column(index.min(2))).expect("placed");
-            if index < 3 {
-                assert_eq!(top_x, col_x, "a top slot sits directly above its column");
-            }
-        }
+        let x = |place| layout.place(place).expect("placed").0;
+        assert_eq!(x(Place::Top(0)), x(Place::Column(0)), "the first slot");
+        assert_eq!(x(Place::Top(1)), x(Place::Column(1)), "the fanned slot");
+        assert_eq!(
+            x(Place::Top(2)),
+            x(Place::Column(3)),
+            "the pile after a two-cell pile starts two cells along"
+        );
+        assert_eq!(x(Place::Top(5)), x(Place::Column(6)), "the last top slot");
     }
 
     #[test]
@@ -1055,17 +1150,70 @@ mod tests {
     #[test]
     fn a_tail_fan_spreads_only_its_last_few_cards() {
         let scene = Scene::new(
-            vec![top(
-                0,
-                &[(0, false), (1, false), (2, false), (3, false), (4, false)],
-                Fan::tail(3),
-            )],
+            vec![Slot {
+                span: 2,
+                ..top(
+                    0,
+                    &[(0, false), (1, false), (2, false), (3, false), (4, false)],
+                    Fan::tail(3),
+                )
+            }],
             1,
         );
         let layout = layout(&scene, &frame(900.0, 600.0));
         let x = |id: u16| layout.card(id).expect("placed").0;
         assert_eq!(x(0), x(1), "the first cards are history");
         assert!(x(2) < x(3) && x(3) < x(4), "the last three fan out");
+        assert!(
+            x(4) + layout.card_w
+                <= layout.place(Place::Top(0)).expect("placed").0 + 2.0 * layout.card_w,
+            "and they stay inside the pile's two cells"
+        );
+    }
+
+    /// The reported defect: three fanned cards hid partially under the pile
+    /// beside them.
+    ///
+    /// A fan spreads by a fraction of the card's height, which is wider than a
+    /// card's cell — so the third card's right edge landed inside the next
+    /// pile's cell, and that pile painted over it. The fan now stays inside its
+    /// own cell, and the cell is two wide.
+    #[test]
+    fn a_three_card_fan_never_reaches_the_next_pile() {
+        let scene = simple_scene();
+        for (width, height) in [(1280.0, 800.0), (1000.0, 700.0), (390.0, 844.0)] {
+            let layout = layout(&scene, &frame(width, height));
+            let last = layout.card(5).expect("the third fanned card is placed");
+            let (next_x, _) = layout.place(Place::Top(2)).expect("the next pile");
+            assert!(
+                last.0 + layout.card_w <= next_x + 0.01,
+                "at {width}x{height} the fan's last card reaches {:.1}, past the next \
+                 pile at {next_x:.1}",
+                last.0 + layout.card_w
+            );
+        }
+    }
+
+    /// A pile with no room to fan does not fan into its neighbour.
+    ///
+    /// The alternative — spreading anyway because that is what the fraction
+    /// says — is exactly the bug above. A pile that wants a fan asks for the
+    /// cells; one that does not gets a packet.
+    #[test]
+    fn a_fan_with_no_room_holds_its_cards_together_rather_than_spilling() {
+        let scene = Scene::new(
+            vec![
+                top(0, &[(0, false), (1, false), (2, false)], Fan::tail(3)),
+                top(1, &[], Fan::PACKET),
+            ],
+            2,
+        );
+        let layout = layout(&scene, &frame(900.0, 600.0));
+        let x = |id: u16| layout.card(id).expect("placed").0;
+        assert_eq!(x(0), x(1));
+        assert_eq!(x(1), x(2));
+        let (next, _) = layout.place(Place::Top(1)).expect("the next pile");
+        assert!(x(2) + layout.card_w <= next + 0.01);
     }
 
     #[test]
@@ -1197,16 +1345,18 @@ mod tests {
     fn the_keyboard_moves_along_the_reading_order_and_wraps() {
         let scene = simple_scene();
         let layout = layout(&scene, &frame(1000.0, 800.0));
+        // The last top slot; the next stop is the first column, and stepping
+        // back from it returns to that slot.
         assert_eq!(
-            layout.next_place(&scene, Place::Top(3), 1),
+            layout.next_place(&scene, Place::Top(5), 1),
             Place::Column(0)
         );
         assert_eq!(
             layout.next_place(&scene, Place::Column(0), -1),
-            Place::Top(3)
+            Place::Top(5)
         );
         assert_eq!(
-            layout.next_place(&scene, Place::Column(2), 1),
+            layout.next_place(&scene, Place::Column(6), 1),
             Place::Top(0),
             "the board wraps rather than stopping"
         );

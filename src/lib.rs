@@ -19,6 +19,7 @@ pub mod board;
 pub mod board_ui;
 pub mod card;
 pub mod game;
+pub mod scene;
 #[cfg(target_arch = "wasm32")]
 pub mod shell;
 
